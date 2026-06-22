@@ -1,0 +1,17 @@
+pandas
+numpy
+matplotlib
+seaborn
+plotly
+nltk
+regex
+scikit-learn
+jupyter
+pytest
+tqdm
+sentence-transformers
+faiss-cpu
+chromadb
+ipykernel
+polars
+pyarrow

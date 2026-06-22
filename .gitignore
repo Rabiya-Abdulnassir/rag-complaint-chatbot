@@ -1,0 +1,58 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+
+# Environment variables / secrets
+.env
+.env.*
+
+# Logs
+*.log
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data files (if large or private)
+# Data files
+data/raw/complaints.csv
+#data/processed/
+data/processed/filtered_complaints.csv
+
+# Vector databases / embeddings
+chroma_db/
+chromadb/
+faiss_index/
+vectorstore/
+
+# Model artifacts
+models/
+checkpoints/
+
+# Temporary files
+tmp/
+temp/
