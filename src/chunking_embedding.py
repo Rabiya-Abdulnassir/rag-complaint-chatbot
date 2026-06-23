@@ -87,18 +87,18 @@ for idx, row in df_sample.iterrows():
 
 print("Total chunks created:", len(all_chunks))
 
-# ============================================================
+# =====================
 # LOAD EMBEDDING MODEL
-# ============================================================
+# =====================
 
 print("Loading embedding model...")
 
 #model = SentenceTransformer(MODEL_NAME)
 model = SentenceTransformer(MODEL_NAME, device="cpu")
 
-# ============================================================
+# ======================
 # GENERATE EMBEDDINGS
-# ============================================================
+# ======================
 
 print("Generating embeddings...")
 

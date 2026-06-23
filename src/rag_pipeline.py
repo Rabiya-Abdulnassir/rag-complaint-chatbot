@@ -2,7 +2,7 @@ import faiss
 import pickle
 import numpy as np
 from sentence_transformers import SentenceTransformer
-from transformers import pipeline
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 import os
 
 # ============================================================
@@ -23,6 +23,15 @@ faiss_index_path = os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")
 chunks_path = os.path.join(VECTOR_STORE_PATH, "chunks.pkl")
 metadata_path = os.path.join(VECTOR_STORE_PATH, "metadata.pkl")
 
+if not os.path.exists(faiss_index_path):
+    raise FileNotFoundError("FAISS index not found")
+
+if not os.path.exists(chunks_path):
+    raise FileNotFoundError("Chunks file not found")
+
+if not os.path.exists(metadata_path):
+    raise FileNotFoundError("Metadata file not found")
+
 index = faiss.read_index(faiss_index_path)
 
 with open(chunks_path, "rb") as f:
@@ -38,22 +47,47 @@ print("Vector store loaded successfully")
 # ============================================================
 
 print("Loading embedding model...")
-model = SentenceTransformer(MODEL_NAME)
-print("Embedding model loaded")
+
+try:
+    model = SentenceTransformer(
+        MODEL_NAME,
+        device="cpu",
+        cache_folder="./hf_cache"
+    )
+
+    print("Embedding model loaded successfully")
+
+except Exception as e:
+    print("ERROR loading embedding model:", e)
+    raise
 
 # ============================================================
 # RETRIEVER FUNCTION
 # ============================================================
 
 def retrieve(query, top_k=TOP_K):
-    query_embedding = model.encode([query]).astype("float32")
 
-    distances, indices = index.search(query_embedding, top_k)
+    query_embedding = model.encode(
+        query,
+        convert_to_numpy=True
+    )
+
+    query_embedding = np.array(
+        [query_embedding]
+    ).astype("float32")
+
+    distances, indices = index.search(
+        query_embedding,
+        top_k
+    )
 
     results = []
+
     for i in indices[0]:
+
         if i == -1:
             continue
+
         if i < len(chunks):
             results.append({
                 "text": chunks[i],
@@ -67,13 +101,16 @@ def retrieve(query, top_k=TOP_K):
 # ============================================================
 
 def build_prompt(context, question):
+
     return f"""
-You are a financial analyst assistant for CrediTrust.
+You are a financial analyst assistant.
 
-Your task is to answer questions about customer complaints.
+Use ONLY the information provided in the context.
 
-Use ONLY the context provided below.
-If the answer is not available in the context, say "I don't have enough information".
+Provide a concise answer.
+
+If the answer cannot be found in the context, say:
+I don't have enough information.
 
 Context:
 {context}
@@ -82,40 +119,74 @@ Question:
 {question}
 
 Answer:
-""".strip()
+"""
 
 # ============================================================
-# LLM (FLAN-T5)
+# LOAD FLAN-T5
 # ============================================================
 
 print("Loading LLM...")
-generator = pipeline(
-    "text2text-generation",
-    model="google/flan-t5-base",
-    max_length=256
-)
-print("LLM loaded")
 
-def generate_answer(prompt):
-    response = generator(prompt)
-    return response[0]["generated_text"]
+tokenizer = AutoTokenizer.from_pretrained(
+    "google/flan-t5-base"
+)
+
+llm_model = AutoModelForSeq2SeqLM.from_pretrained(
+    "google/flan-t5-base"
+)
+
+print("LLM loaded successfully")
 
 # ============================================================
-# RAG PIPELINE FUNCTION
+# GENERATION FUNCTION
+# ============================================================
+
+def generate_answer(prompt):
+
+    inputs = tokenizer(
+        prompt,
+        return_tensors="pt",
+        truncation=True,
+        max_length=1024
+    )
+
+    outputs = llm_model.generate(
+        **inputs,
+        max_new_tokens=100,
+        do_sample=False
+    )
+
+    answer = tokenizer.decode(
+        outputs[0],
+        skip_special_tokens=True
+    )
+
+    return answer
+
+# ============================================================
+# RAG PIPELINE
 # ============================================================
 
 def ask_question(question):
+
     retrieved_docs = retrieve(question)
 
-    if not retrieved_docs:
+    if len(retrieved_docs) == 0:
         return {
             "question": question,
             "answer": "No relevant context found.",
             "sources": []
         }
 
-    context = "\n\n".join([doc["text"] for doc in retrieved_docs])
-    prompt = build_prompt(context, question)
+    context = "\n\n".join(
+        [doc["text"][:500] for doc in retrieved_docs]
+    )
+
+    prompt = build_prompt(
+        context,
+        question
+    )
+
     answer = generate_answer(prompt)
 
     return {
@@ -125,7 +196,7 @@ def ask_question(question):
     }
 
 # ============================================================
-# EVALUATION QUESTIONS (5–10 samples)
+# EVALUATION SET
 # ============================================================
 
 evaluation_questions = [
@@ -133,7 +204,7 @@ evaluation_questions = [
     "Why do customers complain about money transfers?",
     "What problems occur with savings accounts?",
     "What complaints are seen in personal loans?",
-    "Are there delays in transaction processing?",
+    "Are there delays in transaction processing?"
 ]
 
 # ============================================================
@@ -142,20 +213,25 @@ evaluation_questions = [
 
 if __name__ == "__main__":
 
-    results = []
-
     print("\nRunning evaluation...\n")
 
+    results = []
+
     for q in evaluation_questions:
+
         output = ask_question(q)
 
         print("\n" + "=" * 70)
         print("QUESTION:", q)
-        print("\nANSWER:\n", output["answer"])
+
+        print("\nANSWER:")
+        print(output["answer"])
 
         print("\nTOP SOURCES:")
+
         for i, src in enumerate(output["sources"][:2]):
-            print(f"\nSource {i+1}:")
+
+            print(f"\nSource {i + 1}:")
             print(src["text"][:300])
 
         results.append(output)
