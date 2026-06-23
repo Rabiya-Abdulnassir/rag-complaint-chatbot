@@ -1,116 +1,99 @@
 import faiss
-import pickle
 import numpy as np
+import pandas as pd
+import pickle
+import os
 from sentence_transformers import SentenceTransformer
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
-import os
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
 VECTOR_STORE_PATH = "vector_store"
+PARQUET_PATH = "data/complaint_embeddings.parquet"
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
 TOP_K = 5
 
 print("Starting RAG pipeline...")
 
 # ============================================================
-# LOAD VECTOR STORE FILES
+# LOAD PARQUET (THIS IS YOUR REAL DATA SOURCE)
+# ============================================================
+
+if not os.path.exists(PARQUET_PATH):
+    raise FileNotFoundError("Parquet file not found. Put it in /data folder.")
+
+df = pd.read_parquet(PARQUET_PATH)
+
+# EXPECTED COLUMNS (adjust if needed):
+# text OR complaint_text OR chunk
+TEXT_COL = "text" if "text" in df.columns else df.columns[0]
+
+texts = df[TEXT_COL].astype(str).tolist()
+
+print(f"Loaded {len(texts)} rows from parquet")
+
+# ============================================================
+# LOAD FAISS INDEX
 # ============================================================
 
 faiss_index_path = os.path.join(VECTOR_STORE_PATH, "faiss_index.bin")
-chunks_path = os.path.join(VECTOR_STORE_PATH, "chunks.pkl")
-metadata_path = os.path.join(VECTOR_STORE_PATH, "metadata.pkl")
 
 if not os.path.exists(faiss_index_path):
     raise FileNotFoundError("FAISS index not found")
 
-if not os.path.exists(chunks_path):
-    raise FileNotFoundError("Chunks file not found")
-
-if not os.path.exists(metadata_path):
-    raise FileNotFoundError("Metadata file not found")
-
 index = faiss.read_index(faiss_index_path)
 
-with open(chunks_path, "rb") as f:
-    chunks = pickle.load(f)
-
-with open(metadata_path, "rb") as f:
-    metadata = pickle.load(f)
-
-print("Vector store loaded successfully")
+print("FAISS index loaded")
 
 # ============================================================
-# LOAD EMBEDDING MODEL
+# EMBEDDING MODEL
 # ============================================================
 
-print("Loading embedding model...")
+model = SentenceTransformer(
+    MODEL_NAME,
+    device="cpu",
+    cache_folder="./hf_cache"
+)
 
-try:
-    model = SentenceTransformer(
-        MODEL_NAME,
-        device="cpu",
-        cache_folder="./hf_cache"
-    )
-
-    print("Embedding model loaded successfully")
-
-except Exception as e:
-    print("ERROR loading embedding model:", e)
-    raise
+print("Embedding model loaded")
 
 # ============================================================
-# RETRIEVER FUNCTION
+# RETRIEVER (FIXED TO USE PARQUET TEXTS)
 # ============================================================
 
 def retrieve(query, top_k=TOP_K):
 
-    query_embedding = model.encode(
-        query,
-        convert_to_numpy=True
-    )
+    query_vec = model.encode(query, convert_to_numpy=True)
+    query_vec = np.array([query_vec]).astype("float32")
 
-    query_embedding = np.array(
-        [query_embedding]
-    ).astype("float32")
-
-    distances, indices = index.search(
-        query_embedding,
-        top_k
-    )
+    distances, indices = index.search(query_vec, top_k)
 
     results = []
 
     for i in indices[0]:
-
         if i == -1:
             continue
-
-        if i < len(chunks):
+        if i < len(texts):
             results.append({
-                "text": chunks[i],
-                "metadata": metadata[i]
+                "text": texts[i],
+                "metadata": {"row_id": int(i)}
             })
 
     return results
 
 # ============================================================
-# PROMPT TEMPLATE
+# PROMPT
 # ============================================================
 
 def build_prompt(context, question):
-
     return f"""
-You are a financial analyst assistant.
+You are a financial complaint analyst.
 
-Use ONLY the information provided in the context.
+Answer only using the context.
 
-Provide a concise answer.
-
-If the answer cannot be found in the context, say:
-I don't have enough information.
+If not found, say: I don't have enough information.
 
 Context:
 {context}
@@ -119,49 +102,25 @@ Question:
 {question}
 
 Answer:
-"""
+""".strip()
 
 # ============================================================
-# LOAD FLAN-T5
+# LLM (FIXED SEQ2SEQ USAGE)
 # ============================================================
 
-print("Loading LLM...")
-
-tokenizer = AutoTokenizer.from_pretrained(
-    "google/flan-t5-base"
-)
-
-llm_model = AutoModelForSeq2SeqLM.from_pretrained(
-    "google/flan-t5-base"
-)
-
-print("LLM loaded successfully")
-
-# ============================================================
-# GENERATION FUNCTION
-# ============================================================
+tokenizer = AutoTokenizer.from_pretrained("google/flan-t5-base")
+llm_model = AutoModelForSeq2SeqLM.from_pretrained("google/flan-t5-base")
 
 def generate_answer(prompt):
 
-    inputs = tokenizer(
-        prompt,
-        return_tensors="pt",
-        truncation=True,
-        max_length=1024
-    )
+    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=1024)
 
     outputs = llm_model.generate(
         **inputs,
-        max_new_tokens=100,
-        do_sample=False
+        max_new_tokens=120
     )
 
-    answer = tokenizer.decode(
-        outputs[0],
-        skip_special_tokens=True
-    )
-
-    return answer
+    return tokenizer.decode(outputs[0], skip_special_tokens=True)
 
 # ============================================================
 # RAG PIPELINE
@@ -169,71 +128,50 @@ def generate_answer(prompt):
 
 def ask_question(question):
 
-    retrieved_docs = retrieve(question)
+    docs = retrieve(question)
 
-    if len(retrieved_docs) == 0:
+    if not docs:
         return {
             "question": question,
-            "answer": "No relevant context found.",
+            "answer": "No relevant context found",
             "sources": []
         }
 
-    context = "\n\n".join(
-        [doc["text"][:500] for doc in retrieved_docs]
-    )
+    context = "\n\n".join([d["text"][:400] for d in docs])
 
-    prompt = build_prompt(
-        context,
-        question
-    )
+    prompt = build_prompt(context, question)
 
     answer = generate_answer(prompt)
 
     return {
         "question": question,
         "answer": answer,
-        "sources": retrieved_docs
+        "sources": docs
     }
 
 # ============================================================
-# EVALUATION SET
-# ============================================================
-
-evaluation_questions = [
-    "What are common issues with credit cards?",
-    "Why do customers complain about money transfers?",
-    "What problems occur with savings accounts?",
-    "What complaints are seen in personal loans?",
-    "Are there delays in transaction processing?"
-]
-
-# ============================================================
-# RUN EVALUATION
+# TEST
 # ============================================================
 
 if __name__ == "__main__":
 
-    print("\nRunning evaluation...\n")
+    questions = [
+        "What are common issues with credit cards?",
+        "Why do customers complain about money transfers?",
+        "What problems occur with savings accounts?",
+        "What complaints are seen in personal loans?",
+        "Are there delays in transaction processing?"
+    ]
 
-    results = []
+    for q in questions:
+        out = ask_question(q)
 
-    for q in evaluation_questions:
+        print("\n" + "="*70)
+        print("Q:", q)
+        print("A:", out["answer"])
 
-        output = ask_question(q)
-
-        print("\n" + "=" * 70)
-        print("QUESTION:", q)
-
-        print("\nANSWER:")
-        print(output["answer"])
-
-        print("\nTOP SOURCES:")
-
-        for i, src in enumerate(output["sources"][:2]):
-
-            print(f"\nSource {i + 1}:")
-            print(src["text"][:300])
-
-        results.append(output)
+        print("\nSources:")
+        for s in out["sources"][:2]:
+            print("-", s["text"][:200])
 
     print("\nTASK 3 COMPLETED SUCCESSFULLY")
